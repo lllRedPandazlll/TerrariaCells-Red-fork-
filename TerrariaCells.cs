@@ -1,26 +1,73 @@
 global using Microsoft.Xna.Framework;
 using System;
-using Terraria;
-using Terraria.Graphics;
+using System.IO;
+using System.Reflection;
+
 using Terraria.ModLoader;
-using TerrariaCells.Common.Configs;
+using TerrariaCells.Common.Utilities;
 
 namespace TerrariaCells
 {
     //Contributions already present are by no means absolute, conventions are negotiable.
-    public class TerrariaCells : Mod { }
-
-    public class TerraCellsSystem : ModSystem
+    public class TerrariaCells : Mod
     {
-        public override void ModifyTransformMatrix(ref SpriteViewMatrix Transform)
+        public TerrariaCells()
         {
-            if (Main.gameMenu || TerrariaCellsConfig.Instance.DisableZoom)
-                return;
+            MusicSkipsVolumeRemap = true;
+        }
+        public override void HandlePacket(BinaryReader reader, int whoAmI)
+        {
+            ModNetHandler.HandlePacket(this, reader, whoAmI);
+        }
 
-            // Caps zoom at 175%-200%
-            float zoomClamp = Main.GameViewMatrix.Zoom.X;
-            zoomClamp = Math.Max(zoomClamp, 1.75f);
-            Transform.Zoom = Vector2.One * zoomClamp;
+        public override void Load()
+        {
+            StaticFileAccess.Init(this);
+        }
+
+        public override void PostSetupContent()
+        {
+            if (!Terraria.Main.dedServ)
+            {
+                Common.ModPlayers.Regenerator.PlayerResourceSetsManager_SetActive_string.Invoke(Terraria.Main.ResourceSetsManager, new object?[] { "HorizontalBars" });
+            }
+        }
+    }
+    /// <summary>
+    /// Base class for handling net packets, 
+    /// see TerrariaCells/Content/Packets for implementations
+    /// </summary>
+    public abstract class PacketHandler
+	{
+		public TCPacketType HandlerType { get; private set; }
+		/// <summary>
+        /// Override this class to read through certain packets
+        /// </summary>
+        /// <param name="mod">mod instance for convenience sake</param>
+        /// <param name="reader">the reader</param>
+        /// <param name="fromWho">the owner player that sent this packet, equals 255 if server</param>
+		public abstract void HandlePacket(Mod mod, BinaryReader reader, int fromWho);
+
+        protected PacketHandler(TCPacketType handlerType)
+        {
+            HandlerType = handlerType;
+        }
+        /// <summary>
+        /// Get a ModPacket with some written data. Write into a ModPacket with the HandlerType of the class, the sub packetType and the sender
+        /// </summary>
+        /// <param name="packetType">Type of packet, for most packets this should be 0</param>
+        /// <param name="fromWho"> The sender of the packet, if it's lower than 0, it won't be written into the packet</param>
+        /// <returns>A ModPacket that contains in this order a HandlerType, the given packetType, and the sender</returns>
+		protected ModPacket GetPacket(byte packetType, int fromWho)
+        {
+            ModPacket p = ModContent.GetInstance<TerrariaCells>().GetPacket();
+            p.Write((byte)HandlerType);
+            p.Write(packetType);
+            if (fromWho > -1)
+            {
+                p.Write((byte)fromWho);
+            }
+            return p;
         }
     }
 }

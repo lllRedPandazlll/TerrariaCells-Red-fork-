@@ -1,39 +1,350 @@
-using System.Linq;
+using System.Collections.Generic;
+using Terraria;
+using Terraria.ID;
 using Terraria.DataStructures;
 using Terraria.ModLoader;
 using TerrariaCells.Common.Configs;
 using TerrariaCells.Common.Items;
 using TerrariaCells.Common.Systems;
+using Terraria.ModLoader.IO;
+using static TerrariaCells.Common.Utilities.PlayerHelpers;
+using TerrariaCells.Common.GlobalItems;
+using TerrariaCells.Common.Utilities;
 
 namespace TerrariaCells.Common.ModPlayers;
 
 public class DeathReset : ModPlayer, IEntitySource
 {
-    public string Context => "TerrariaCells.Common.ModPlayers.DeathReset";
+    public const int MaxRespawnTime = 300; //5 sec
+
+	public string Context => "TerrariaCells.Common.ModPlayers.DeathReset";
 
     public override void Kill(
-        double damage,
-        int hitDirection,
-        bool pvp,
-        PlayerDeathReason damageSource
-    )
-    {
-        Mod.GetContent<TeleportTracker>().First().Reset();
-        Mod.GetContent<ClickedHeartsTracker>().First().Reset();
-        Mod.GetContent<ChestLootSpawner>().First().Reset();
-        if (!DevConfig.Instance.DropItems)
+		double damage,
+		int hitDirection,
+		bool pvp,
+		PlayerDeathReason damageSource
+	)
+	{
+        Player.RemoveSpawn();
+        ResetInventory(ResetInventoryContext.Death);
+
+		//Reset mana
+		Player.statMana = Player.statManaMax2;
+
+        Player.respawnTimer = MaxRespawnTime;
+
+        if (Main.netMode == NetmodeID.SinglePlayer)
+        {
+            //Reset systems
+            ModContent.GetInstance<ClickedHeartsTracker>().Reset();
+            ModContent.GetInstance<ChestLootSpawner>().Reset();
+            WorldPylonSystem.ResetPylons();
+            RewardTrackerSystem.UpdateTracker(RewardTrackerSystem.TrackerAction.Stop);
+            Player.GetModPlayer<LifeModPlayer>().extraHealth = 0;
+        }
+	}
+
+	public override void OnEnterWorld()
+	{
+        bool isNewWorld = Player.IsNewWorld();
+        if (Main.netMode == NetmodeID.SinglePlayer && !isNewWorld)
         {
             return;
         }
-        foreach ((int itemslot, TerraCellsItemCategory _) in InventoryManager.slotCategorizations)
+        if (isNewWorld && !Configs.DevConfig.Instance.BuilderMode)
         {
-            Entity.DropItem(this, Entity.Center, ref Entity.inventory[itemslot]);
+            if (Main.netMode == 0)
+            {
+                ModContent.GetInstance<ClickedHeartsTracker>().Reset();
+                ModContent.GetInstance<ChestLootSpawner>().Reset();
+                WorldPylonSystem.ResetPylons();
+                RewardTrackerSystem.UpdateTracker(RewardTrackerSystem.TrackerAction.Stop);
+            }
+            ResetInventory(ResetInventoryContext.NewWorld);
+            Player.GetModPlayer<LifeModPlayer>().extraHealth = 0;
+            Common.GlobalNPCs.NPCTypes.Crimson.BrainOfCthulhu.SpawnPos = null;
+            GlobalNPCs.NPCTypes.Corruption.EaterOfWorlds.SpawnPos = null;
         }
-        Entity.DropItem(this, Entity.Center, ref Entity.inventory[58]);
-        Entity.DropItem(this, Entity.Center, ref Entity.armor[0]);
-        Entity.DropItem(this, Entity.Center, ref Entity.armor[1]);
-        Entity.DropItem(this, Entity.Center, ref Entity.armor[2]);
-        Entity.DropItem(this, Entity.Center, ref Entity.armor[3]);
-        Entity.DropItem(this, Entity.Center, ref Entity.armor[4]);
+
+        if (Main.netMode == NetmodeID.MultiplayerClient)
+        {
+            var packet = ModNetHandler.GetPacket(Mod, TCPacketType.PlayerPacket);
+            packet.Write((byte)Content.Packets.PlayerPacketHandler.PlayerSyncType.NewPlayerJoin);
+            packet.Send();
+        }
+    }
+
+    public override void ModifyScreenPosition()
+    {
+        if (Player.DeadOrGhost)
+        {
+            int viewTarget = -1;
+            for (int i = 0; i < Main.maxNetPlayers; i++)
+            {
+                Player test = Main.player[i];
+                if (!test.active) continue;
+                if (test.DeadOrGhost) continue;
+                if (test.whoAmI == Main.myPlayer) continue;
+                viewTarget = i;
+                break;
+            }
+            if (viewTarget == -1)
+                return;
+            Player followPlayer = Main.player[viewTarget];
+            Main.screenPosition = followPlayer.Center - (Main.ScreenSize.ToVector2() * 0.5f);
+        }
+    }
+    public override void PostUpdate()
+    {
+        if(Main.netMode != NetmodeID.MultiplayerClient) return;
+        if (Player.DeadOrGhost)
+        {
+            int viewTarget = -1;
+            for (int i = 0; i < Main.maxNetPlayers; i++)
+            {
+                Player test = Main.player[i];
+                if (!test.active)
+                    continue;
+                if (test.DeadOrGhost)
+                    continue;
+                if (test.whoAmI == Main.myPlayer)
+                    continue;
+                viewTarget = i;
+                break;
+            }
+            if (viewTarget == -1)
+                return;
+            Player followPlayer = Main.player[viewTarget];
+            Player.position = followPlayer.position;
+        }
+    }
+
+    public override void OnRespawn()
+	{
+        if (Main.netMode == NetmodeID.SinglePlayer)
+        {
+            var UID = Main.ActiveWorldFileData.UniqueId;
+            WorldGen.SaveAndQuit(delegate {
+                if(!Configs.DevConfig.Instance.EnableCustomWorldGen) return;
+                Main.LoadWorlds();
+                for (int i = 0; i < Main.WorldList.Count; i++)
+                {
+                    if (Main.WorldList[i].UniqueId.Equals(UID))
+                        typeof(Main).GetMethod("EraseWorld", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static).Invoke(null, [i]);
+                }
+            });
+        }
+        return;
+
+		foreach (NPC npc in Main.ActiveNPCs)
+			if (!npc.friendly) npc.active = false; //Kill all NPCs so they aren't re-added to respawn buffer
+		foreach (Item item in Main.ActiveItems)
+			item.TurnToAir(true); //Turn all items to air, so player and NPC drops don't remain
+		foreach (Projectile projectile in Main.ActiveProjectiles)
+			projectile.active = false; //Disable any tombstones or what-have-you
+
+		NPCRoomSpawner.ResetSpawns();
+	}
+
+    enum ResetInventoryContext : byte
+    {
+        NewWorld,
+        Death,
+    }
+    private void ResetInventory(ResetInventoryContext context)
+    {
+        if (!DevConfig.Instance.DropItems)
+            return;
+        if (Player.whoAmI != Main.myPlayer)
+            return;
+
+        #region Drop Items
+        ref Item[] inventory = ref Player.inventory;
+        ref Item[] equips = ref Player.armor;
+        Vector2 centre = Player.Center;
+        IEntitySource playerDeath = Player.GetSource_Death();
+        if (context == ResetInventoryContext.NewWorld)
+        {
+            foreach ((int itemslot, TerraCellsItemCategory _) in InventoryManager.slotCategorizations)
+            {
+                inventory[itemslot].TurnToAir();
+            }
+
+            inventory[50].TurnToAir(true);
+            inventory[51].TurnToAir(true);
+            inventory[52].TurnToAir(true);
+            inventory[53].TurnToAir(true);
+            inventory[58].TurnToAir(true);
+            equips[0].TurnToAir(true);
+            equips[1].TurnToAir(true);
+            equips[2].TurnToAir(true);
+            equips[3].TurnToAir(true);
+            equips[4].TurnToAir(true);
+            equips[5].TurnToAir(true);
+
+            for (int i = 0; i < 58; i++)
+            {
+                inventory[i].TurnToAir(true);
+            }
+        }
+        else if (context == ResetInventoryContext.Death && Main.netMode != NetmodeID.Server)
+        {
+            foreach ((int itemslot, TerraCellsItemCategory _) in InventoryManager.slotCategorizations)
+            {
+                inventory[itemslot].shimmered = true;
+                Player.TryDroppingSingleItem(playerDeath, inventory[itemslot]);
+            }
+
+            inventory[50].shimmered =   true; Player.TryDroppingSingleItem(playerDeath, inventory[50]);
+            inventory[51].shimmered =   true; Player.TryDroppingSingleItem(playerDeath, inventory[51]);
+            inventory[52].shimmered =   true; Player.TryDroppingSingleItem(playerDeath, inventory[52]);
+            inventory[53].shimmered =   true; Player.TryDroppingSingleItem(playerDeath, inventory[53]);
+            inventory[58].shimmered =   true; Player.TryDroppingSingleItem(playerDeath, inventory[58]);
+            equips[0].shimmered =       true; Player.TryDroppingSingleItem(playerDeath, equips[0]);
+            equips[1].shimmered =       true; Player.TryDroppingSingleItem(playerDeath, equips[1]);
+            equips[2].shimmered =       true; Player.TryDroppingSingleItem(playerDeath, equips[2]);
+            equips[3].shimmered =       true; Player.TryDroppingSingleItem(playerDeath, equips[3]);
+            equips[4].shimmered =       true; Player.TryDroppingSingleItem(playerDeath, equips[4]);
+            equips[5].shimmered =       true; Player.TryDroppingSingleItem(playerDeath, equips[5]);
+
+            for (int i = 0; i < 58; i++)
+            {
+                inventory[i].TurnToAir(true);
+            }
+        }
+        #endregion
+
+        #region Startup Inventory
+        Dictionary<int, Item> inv = new Dictionary<int, Item>()
+        {
+            [0] = new Item(ItemID.CopperShortsword),
+            [1] = new Item(ItemID.WoodenBow),
+        };
+        switch (context)
+        {
+            case ResetInventoryContext.NewWorld:
+                inv[4] = new Item(ItemID.LesserHealingPotion, 2);
+                break;
+        }
+
+        foreach (KeyValuePair<int, Item> pair in inv)
+        {
+            Player.inventory[pair.Key] = pair.Value;
+
+            switch (context)
+            {
+                case ResetInventoryContext.Death:
+                    if (Player.inventory[pair.Key].TryGetGlobalItem<TierSystemGlobalItem>(out var tierItem))
+                    {
+                        //Level + 1, because while they're.. decent, they're not AMAZING, and the weapons should be on-tier
+                        tierItem.SetLevel(Player.inventory[pair.Key], ModContent.GetInstance<Systems.TeleportTracker>().level + 1);
+                        FunkyModifierItemModifier.Reforge(Player.inventory[pair.Key], tierItem.itemLevel);
+                    }
+                    break;
+            }
+        }
+        #endregion
+    }
+
+    public override void ModifyStartingInventory(IReadOnlyDictionary<string, List<Item>> itemsByMod, bool mediumCoreDeath)
+	{
+		itemsByMod["Terraria"].Clear();
+	}
+
+	public override void Load()
+	{
+		Terraria.GameContent.UI.States.On_UICharacterCreation.SetupPlayerStatsAndInventoryBasedOnDifficulty += SetupPlayerInfo;
+        On_Player.SavePlayerFile_Vanilla += On_Player_SavePlayerFile_Vanilla;
+        On_Player.CheckSpawn += On_Player_CheckSpawn;
+	}
+
+    private bool On_Player_CheckSpawn(On_Player.orig_CheckSpawn orig, int x, int y)
+    {
+        return true;
+    }
+
+    //Changing this in PreSave() hook didn't work :/
+    private byte[] On_Player_SavePlayerFile_Vanilla(On_Player.orig_SavePlayerFile_Vanilla orig, Terraria.IO.PlayerFileData playerFile)
+    {
+        playerFile.Player.ChangeSpawn((int)(playerFile.Player.position.X / 16), (int)(playerFile.Player.Bottom.Y / 16));
+        byte[] result_orig = orig.Invoke(playerFile);
+        playerFile.Player.RemoveSpawn();
+        return result_orig;
+    }
+
+    public override void Unload()
+	{
+		Terraria.GameContent.UI.States.On_UICharacterCreation.SetupPlayerStatsAndInventoryBasedOnDifficulty -= SetupPlayerInfo;
+	}
+
+	//Remove wings and finch staff buff
+	private void SetupPlayerInfo(Terraria.GameContent.UI.States.On_UICharacterCreation.orig_SetupPlayerStatsAndInventoryBasedOnDifficulty orig, Terraria.GameContent.UI.States.UICharacterCreation self)
+	{
+		orig.Invoke(self);
+
+		Player player = (Player)self.GetType().GetField("_player", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(self);
+		player.armor[3].TurnToAir();
+		player.ClearBuff(216); //Finch, which is for some reason applied at character creation
+
+        player.statMana = player.statManaMax;
+	}
+}
+
+public class DeathBoot : ModSystem
+{
+    public override void Load()
+    {
+        On_Main.DrawStarsInBackground += On_Main_DrawStarsInBackground;
+        On_Main.DrawPrettyStarSparkle += On_Main_DrawPrettyStarSparkle;
+    }
+    public override void Unload()
+    {
+        On_Main.DrawStarsInBackground -= On_Main_DrawStarsInBackground;
+        On_Main.DrawPrettyStarSparkle -= On_Main_DrawPrettyStarSparkle;
+    }
+
+    private void On_Main_DrawPrettyStarSparkle(On_Main.orig_DrawPrettyStarSparkle orig, float opacity, Microsoft.Xna.Framework.Graphics.SpriteEffects dir, Vector2 drawpos, Color drawColor, Color shineColor, float flareCounter, float fadeInStart, float fadeInEnd, float fadeOutStart, float fadeOutEnd, float rotation, Vector2 scale, Vector2 fatness)
+    {
+        if (Main.netMode == NetmodeID.Server)
+            return;
+        if (!Main.LocalPlayer.DeadOrGhost)
+        {
+            orig.Invoke(opacity, dir, drawpos, drawColor, shineColor, flareCounter, fadeInStart, fadeInEnd, fadeOutStart, fadeOutEnd, rotation, scale, fatness);
+        }
+    }
+
+    private void On_Main_DrawStarsInBackground(On_Main.orig_DrawStarsInBackground orig, Main self, Main.SceneArea sceneArea, bool artificial)
+    {
+        if (Main.netMode == NetmodeID.Server)
+            return;
+        if (!Main.LocalPlayer.DeadOrGhost)
+        {
+            orig.Invoke(self, sceneArea, artificial);
+        }
+    }
+
+    public override void ModifyLightingBrightness(ref float scale)
+    {
+        if (Main.netMode != NetmodeID.SinglePlayer)
+            return;
+        if (Main.LocalPlayer.DeadOrGhost)
+        {
+            scale = ((float)Main.LocalPlayer.respawnTimer / (float)DeathReset.MaxRespawnTime);
+        }
+    }
+    public override void ModifySunLightColor(ref Color tileColor, ref Color backgroundColor)
+    {
+        if (Main.netMode != NetmodeID.SinglePlayer)
+            return;
+        if (Main.LocalPlayer.DeadOrGhost)
+        {
+            float scale = ((float)Main.LocalPlayer.respawnTimer / (float)DeathReset.MaxRespawnTime);
+            (byte tileColourA, byte backgroundColourA) = (tileColor.A, backgroundColor.A);
+            tileColor *= scale;
+            backgroundColor *= scale;
+            tileColor.A = tileColourA;
+            backgroundColor.A = backgroundColourA;
+        }
     }
 }

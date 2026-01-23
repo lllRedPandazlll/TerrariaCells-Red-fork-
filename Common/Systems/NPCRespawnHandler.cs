@@ -47,39 +47,48 @@ namespace TerrariaCells.Common.Systems
         private static void On_NPC_CheckActive(On_NPC.orig_CheckActive orig, NPC self)
         {
             bool wasActive = self.active;
+            int prevHealth = self.lifeMax;
             orig.Invoke(self);
-            if (self.life > 1 && !NPCID.Sets.ProjectileNPC[self.type] && wasActive && !self.active)
+            if (prevHealth > 1 && !NPCID.Sets.ProjectileNPC[self.type] && wasActive && !self.active)
             {
-                RespawnMarkers.Add(
-                    new NPCRespawnMarker(
+                NPCRespawnMarker marker = new NPCRespawnMarker(
                         self.type,
-                        Utilities.TCellsUtils.FindGround(self.getRect(), 20) - new Vector2(self.width * 0.5f, self.height * 0.5f),
-                        self.life));
+                        self.position, //Utilities.TCellsUtils.FindGround(self.getRect(), 20) - new Vector2(self.width * 0.5f, self.height * 0.5f),
+                        prevHealth);
+                if (NPCID.Sets.SpecialSpawningRules.TryGetValue(self.type, out int value) && value == 0)
+                    marker.RespawnTile = new Point16((short)self.ai[0], (short)self.ai[1]);
+                HandleSpecialDespawn(self, ref marker);
+                RespawnMarkers.Add(marker);
             }
+        }
+
+        internal static void ResetRespawnMarkers()
+        {
+            RespawnMarkers = new List<NPCRespawnMarker>();
         }
 
         //Prepare datastructures
         public override void ClearWorld()
         {
-            RespawnMarkers = new List<NPCRespawnMarker>();
+            ResetRespawnMarkers();
         }
 
         //More or less modified source for respawn system
         public override void PostUpdateNPCs()
         {
-            if (Main.netMode == NetmodeID.MultiplayerClient)
-                return;
-
-            if (RespawnMarkers.Count == 0)
-                return;
+			//Disable spawns if disabled
+			if (Configs.DevConfig.Instance.DisableSpawns) return;
+            if (Main.netMode == NetmodeID.MultiplayerClient) return;
+            if (RespawnMarkers.Count == 0) return;
 
             List<Rectangle> respawnRects = new List<Rectangle>();
             Vector2 rectSize = new Vector2(2608f*0.67f, 1840f*0.67f);
             for (int i = 0; i < Main.maxPlayers; i++)
             {
                 Player player = Main.player[i];
-                if (!player.active || player.dead)
+                if (!player.active || player.DeadOrGhost)
                     continue;
+
                 respawnRects.Add(Utils.CenteredRectangle(player.Center, rectSize));
             }
             if (respawnRects.Count == 0)
@@ -126,7 +135,14 @@ namespace TerrariaCells.Common.Systems
                     newNPC.ai[1] = marker.RespawnTile.Y;
                     newNPC.netUpdate = true;
                 }
+                if (Main.netMode == NetmodeID.Server)
+                {
+                    NetMessage.SendData(MessageID.SyncNPC, -1, -1, null, newNPC.whoAmI);
+                }
+                HandleSpecialSpawn(newNPC, marker.RespawnTile.X, marker.RespawnTile.Y);
                 newNPC.timeLeft = 3600; //1 min
+                newNPC.netUpdate = true;
+                newNPC.netUpdate2 = true;
             }
         }
 
@@ -135,7 +151,18 @@ namespace TerrariaCells.Common.Systems
             return;
         }
 
-
+        internal static void HandleSpecialDespawn(NPC npc, ref NPCRespawnMarker marker)
+        {
+            switch (npc.type)
+            {
+                case NPCID.SpikeBall:
+                    marker.RespawnTile = (new Vector2(npc.ai[1], npc.ai[2]) - (npc.Size * 0.5f)).ToTileCoordinates16();
+                    break;
+            }
+        }
+        internal static void HandleSpecialSpawn(NPC npc, int i, int j)
+        {
+        }
 
 
 

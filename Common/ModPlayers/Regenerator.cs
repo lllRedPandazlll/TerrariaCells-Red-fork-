@@ -18,19 +18,22 @@ namespace TerrariaCells.Common.ModPlayers
 	//ModPlayer handling health and regeneration aspects
 	public class Regenerator : ModPlayer
 	{
-		public override void Load()
-		{
-			//TODO: Change this to IL Edit
-			// Better for crossmod compatability
-			// Less redundant coding
-			// This is technically improper use of detouring
-			On_ResourceDrawSettings.Draw += DrawRallyHealthBar;
+        public static readonly MethodInfo PlayerResourceSetsManager_SetActive_string = typeof(PlayerResourceSetsManager).GetMethod("SetActive", BindingFlags.NonPublic | BindingFlags.Instance, [typeof(string)]);
+        public override void Load()
+        {
+            //TODO: Change this to IL Edit
+            // Better for crossmod compatability
+            // Less redundant coding
+            // This is technically improper use of detouring
+            On_ResourceDrawSettings.Draw += DrawRallyHealthBar;
 
-			IL_HorizontalBarsPlayerResourcesDisplaySet.Draw += IL_HorizontalBarsPlayerResourcesDisplaySet_Draw;
-			IL_HorizontalBarsPlayerResourcesDisplaySet.LifeFillingDrawer += IL_HealthbarTextureSelect;
-		}
+            On_PlayerResourceSetsManager.CycleResourceSet += DisableHealthbarStyleChange;
 
-		public override void Unload()
+            IL_HorizontalBarsPlayerResourcesDisplaySet.Draw += IL_HorizontalBarsPlayerResourcesDisplaySet_Draw;
+            IL_HorizontalBarsPlayerResourcesDisplaySet.LifeFillingDrawer += IL_HealthbarTextureSelect;
+        }
+
+        public override void Unload()
 		{
 			On_ResourceDrawSettings.Draw -= DrawRallyHealthBar;
 
@@ -38,18 +41,10 @@ namespace TerrariaCells.Common.ModPlayers
 			IL_HorizontalBarsPlayerResourcesDisplaySet.LifeFillingDrawer -= IL_HealthbarTextureSelect;
 		}
 
-		public override IEnumerable<Item> AddStartingItems(bool mediumCoreDeath)
-		{
-			if (mediumCoreDeath)
-				return base.AddStartingItems(mediumCoreDeath);
-			return new Item[]
-				{
-					new Item(Terraria.ID.ItemID.LesserHealingPotion, 2),
-				};
-		}
-
 		#region Healthbar
 		public const int MAX_HEALTHBAR_SIZE = 800;
+		public const string BAR_HEALTH_FILL1 = "Images\\UI\\PlayerResourceSets\\HorizontalBars\\HP_Fill";
+		public const string BAR_HEALTH_FILL2 = "Images\\UI\\PlayerResourceSets\\HorizontalBars\\HP_Fill_Honey";
 
 		private static void IL_HealthbarTextureSelect(ILContext context)
 		{
@@ -229,21 +224,25 @@ namespace TerrariaCells.Common.ModPlayers
 				value += self.OffsetPerDraw + (rectangle2.Size() * self.OffsetPerDrawByTexturePercentile);
 			}
 		}
-		#endregion
 
-		#region Rally Heal Mechanic
-		public const float STAGGER_POTENCY = 3f;
+        private FieldInfo PlayerResourceSetsManager_selectedSet = typeof(PlayerResourceSetsManager).GetField("selectedSet", BindingFlags.NonPublic | BindingFlags.Instance);
+        private void DisableHealthbarStyleChange(On_PlayerResourceSetsManager.orig_CycleResourceSet orig, PlayerResourceSetsManager self)
+        {
+            return;
+        }
+        #endregion
+
+        #region Rally Heal Mechanic
+        public const float STAGGER_POTENCY = 3f;
 		public const float INV_STAGGER_POTENCY = 1f / STAGGER_POTENCY;
-		public const string BAR_HEALTH_FILL1 = "Images\\UI\\PlayerResourceSets\\HorizontalBars\\HP_Fill";
-		public const string BAR_HEALTH_FILL2 = "Images\\UI\\PlayerResourceSets\\HorizontalBars\\HP_Fill_Honey";
 
 		private float damageBuffer;
 		private int damageTime;
 		private float antiRegen;
 
-		private float TimeAmplitude => damageBuffer * INV_STAGGER_POTENCY; //Used for calculations, opposite of MaxTime
-		private float MaxTime => damageBuffer * STAGGER_POTENCY; //Time it will take for damage to stop ticking.
-		private float DamageLeft => -MathF.Sqrt(TimeAmplitude * damageTime) + damageBuffer; //Remaining amount of damage for the player to take
+		public float TimeAmplitude => damageBuffer * INV_STAGGER_POTENCY; //Used for calculations, opposite of MaxTime
+		public float MaxTime => damageBuffer * STAGGER_POTENCY; //Time it will take for damage to stop ticking.
+		public float DamageLeft => -MathF.Sqrt(TimeAmplitude * damageTime) + damageBuffer; //Remaining amount of damage for the player to take
 
 		//Mathematics used for Damage Staggering:
 			//Damage Left = -sqrt(TimeAmplitude * damageTime) + damageBuffer
@@ -372,7 +371,7 @@ namespace TerrariaCells.Common.ModPlayers
 		/// <param name="amount"></param>
 		internal void RallyHeal(int amount)
 		{
-			if (damageBuffer > 0)
+			if (damageBuffer > 0 && amount/2 > 0)
 			{
 				amount /= 2;
 				Player.HealEffect(amount);
@@ -406,15 +405,17 @@ namespace TerrariaCells.Common.ModPlayers
 			return false;
 		}
 
-		//Disable Health Potion CD
+		//Disable Health Potion CD and Mana Sickness
 		public override void PreUpdateBuffs()
 		{
 			Player.ClearBuff(Terraria.ID.BuffID.PotionSickness);
+			Player.ClearBuff(Terraria.ID.BuffID.ManaSickness);
 			Player.potionDelay = 0;
 		}
 		#endregion
 
 		#region Disable Health Regen
+        //Check 'regen' > 0 before setting to 0 to remove nullification of debuff damage
 		public override void NaturalLifeRegen(ref float regen)
 		{
 			regen = 0;
@@ -427,26 +428,46 @@ namespace TerrariaCells.Common.ModPlayers
 		}
 		#endregion
 
-
 		#region Player Death
 		private string? deathReason = null;
 		//Make sure player dies when they hit <=0 health
 		private void CheckDead()
 		{
-			if (Player.statLife <= 0)
+			if (Player.statLife - (DamageLeft+0.51f) <= 0)
 			{
 				deathReason ??= $"{Player.name} was beheaded.";
 
-				Player.KillMe(PlayerDeathReason.ByCustomReason(deathReason), 1, 0);
+				Player.KillMe(PlayerDeathReason.ByCustomReason(deathReason), Player.statLife + 1, 0);
 			}
 		}
 
-		public override bool PreKill(double damage, int hitDirection, bool pvp, ref bool playSound, ref bool genDust, ref PlayerDeathReason damageSource)
+		public override void Kill(double damage, int hitDirection, bool pvp, PlayerDeathReason damageSource)
 		{
-			bool result = base.PreKill(damage, hitDirection, pvp, ref playSound, ref genDust, ref damageSource);
-			if (result) SetStaggerDamage(0);
-			return result;
+			SetStaggerDamage(0);
 		}
-		#endregion
-	}
+        #endregion
+
+        #region Nurse Modifications
+        public override bool ModifyNurseHeal(NPC nurse, ref int health, ref bool removeDebuffs, ref string chatText)
+        {
+            if (nurse.GetGlobalNPC<GlobalNPCs.VanillaNPCShop>().nurse_HasHealed)
+            {
+                chatText = "I can't do any more for you right now.";
+                return false;
+            }
+            health = Math.Min(health, Player.statLifeMax2 / 2);
+            removeDebuffs = false; //Don't modify charge because player has ineffective venom or whatever
+            return base.ModifyNurseHeal(nurse, ref health, ref removeDebuffs, ref chatText);
+        }
+        public override void ModifyNursePrice(NPC nurse, int health, bool removeDebuffs, ref int price)
+        {
+            int currentLevel = ModContent.GetInstance<Systems.TeleportTracker>().level;
+            price = 2_00_00 * currentLevel;
+        }
+        public override void PostNurseHeal(NPC nurse, int health, bool removeDebuffs, int price)
+        {
+            nurse.GetGlobalNPC<GlobalNPCs.VanillaNPCShop>().nurse_HasHealed = true;
+        }
+        #endregion
+    }
 }

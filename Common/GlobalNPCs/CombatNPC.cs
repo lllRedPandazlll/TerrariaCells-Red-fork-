@@ -7,25 +7,21 @@ using Microsoft.Xna.Framework.Graphics;
 using TerrariaCells.Common.Utilities;
 
 using static TerrariaCells.Common.Utilities.NPCHelpers;
+using System.Linq;
+using Terraria.ModLoader.IO;
+using System.IO;
+using TerrariaCells.Common.GlobalNPCs.NPCTypes.Shared;
 
 namespace TerrariaCells.Common.GlobalNPCs
 {
 	public class CombatNPC : GlobalNPC
 	{
-		public override bool InstancePerEntity => true;
+        public override bool InstancePerEntity => true;
 		public bool allowContactDamage = true;
-
-		public override void SetDefaults(NPC npc)
-		{
-			switch (npc.type)
-			{
-				case NPCID.BrainofCthulhu:
-					npc.knockBackResist = 0f; //0 effect from knockback
-					break;
-			}
-
-			SetEnemyStats(npc);
-		}
+        private bool? canDrawActiveHitbox = null;
+        public bool CanDrawActiveHitbox(NPC npc) => !Main.npc.Where(x => x.active).Any(x => x.realLife == npc.whoAmI && !x.GetGlobalNPC<CombatNPC>().allowContactDamage)
+            && _canDrawActiveHitbox_DisableWorms(npc);
+        private bool _canDrawActiveHitbox_DisableWorms(NPC npc) => !new HashSet<int>([NPCID.DevourerHead, NPCID.GiantWormHead, NPCID.StardustWormHead, NPCID.DiggerHead]).Contains(npc.type);
 
 		public override bool CanHitPlayer(NPC npc, Player target, ref int cooldownSlot)
 		{
@@ -33,102 +29,249 @@ namespace TerrariaCells.Common.GlobalNPCs
 			return base.CanHitPlayer(npc, target, ref cooldownSlot);
 		}
 
-		public static void ToggleContactDamage(NPC npc, bool value) => npc.GetGlobalNPC<CombatNPC>().allowContactDamage = value;
+        public static void ToggleContactDamage(NPC npc, bool value) => npc.GetGlobalNPC<CombatNPC>().allowContactDamage = value;
+        public override void DrawEffects(NPC npc, ref Color drawColor)
+        {
+            if (canDrawActiveHitbox is null)
+                canDrawActiveHitbox = CanDrawActiveHitbox(npc);
+            if (allowContactDamage && canDrawActiveHitbox == true && npc.lifeMax > 1)
+            {
+                byte b;
+                byte b2;
+                byte b3;
+                if (!(npc.friendly || npc.catchItem > 0 || (npc.damage == 0 && npc.lifeMax == 5)))
+                {
+                    b = byte.MaxValue;
+                    b2 = 50;
+                    b3 = 50;
+                }
+                else
+                {
+                    return;
+                }
+                if (drawColor.R < b)
+                {
+                    drawColor.R = b;
+                }
+                if (drawColor.G < b2)
+                {
+                    drawColor.G = b2;
+                }
+                if (drawColor.B < b3)
+                {
+                    drawColor.B = b3;
+                }
+            }
+        }
 
-		public override bool PreDraw(NPC npc, SpriteBatch spriteBatch, Vector2 screenPos, Color drawColor)
+        //As an aside, I hate that this is called "send extra AI" when it should just have been netsend like literally every other hook of its nature
+        //I'm not sending AI here, as it turns out. ]:/
+        public override void SendExtraAI(NPC npc, BitWriter bitWriter, BinaryWriter binaryWriter)
+        {
+            bitWriter.WriteBit(allowContactDamage);
+
+            //bitWriter.Flush(binaryWriter);
+        }
+        public override void ReceiveExtraAI(NPC npc, BitReader bitReader, BinaryReader binaryReader)
+        {
+            allowContactDamage = bitReader.ReadBit();
+        }
+
+        public override void SetStaticDefaults()
 		{
+			NPCID.Sets.ProjectileNPC[NPCID.Creeper] = true;
+
+			NPCID.Sets.TrailCacheLength[NPCID.Crimslime] = 10;
+			NPCID.Sets.TrailingMode[NPCID.Crimslime] = 1;
+
+            NPCID.Sets.SpecialSpawningRules[NPCID.DesertDjinn] = 0;
+
+            NPCID.Sets.SpecificDebuffImmunity[NPCID.BloodCrawler][BuffID.Poisoned] = false;
+            NPCID.Sets.SpecificDebuffImmunity[NPCID.BloodCrawlerWall][BuffID.Poisoned] = false;
+            NPCID.Sets.SpecificDebuffImmunity[NPCID.Crimslime][BuffID.Poisoned] = false;
+        }
+		public override void SetDefaults(NPC npc)
+		{
+            //Some levels will lead to more than one *other* level. Using a/b/.. to direct path in comments
 			switch (npc.type)
 			{
-				case NPCID.BrainofCthulhu:
-					int timer = npc.Timer();
-
-					if (timer > NPCTypes.BrainOfCthulhu.XTimeStart - 60 && timer < NPCTypes.BrainOfCthulhu.XTimeStart)
-					{
-						Vector2 centre = NPCTypes.BrainOfCthulhu.GetArenaCentre(npc);
-						Vector2 offset = NPCTypes.BrainOfCthulhu.ArenaSize * 0.5f;
-						Vector2[] positions = new Vector2[] {
-						centre + (offset * -1),
-						centre + offset,
-						centre + (offset * new Vector2(1, -1)),
-						centre + (offset * new Vector2(-1, 1)),
-						};
-						for (int i = 0; i < positions.Length; i++)
-						{
-							//int opposingIndex = (2 * (i / 2)) - (i % 2) + 1;
-							//Vector2 opposingPosition = positions[opposingIndex];
-							Vector2 pos = positions[i];
-							Color c = Color.Red * 0.75f;
-							float res = NPCHelpers.Pack(pos.ToTileCoordinates16());
-							if (res.Equals(npc.ai[2]))
-							{
-								c = Color.Yellow * 0.75f;
-							}
-							Terraria.Utils.DrawLine(spriteBatch, pos, centre, c, Color.Transparent, ((NPCTypes.BrainOfCthulhu.XTimeStart - timer) / 60f) * 8);
-						}
-					}
-					if (NPCTypes.BrainOfCthulhu.XTimeStart < timer && timer < NPCTypes.BrainOfCthulhu.XTimeEnd)
-					{
-						float percent = TCellsUtils.GetLerpValue(timer, (NPCTypes.BrainOfCthulhu.XTimeEnd - NPCTypes.BrainOfCthulhu.XTimeStart), TCellsUtils.LerpEasing.InOutBack, NPCTypes.BrainOfCthulhu.XTimeStart, false);
-						Vector2 centre = NPCTypes.BrainOfCthulhu.GetArenaCentre(npc);
-						Vector2 size = NPCTypes.BrainOfCthulhu.ArenaSize;
-						Vector2 topLeft = centre - (size * 0.5f);
-						Vector2 botLeft = topLeft + new Vector2(0, size.Y);
-						Vector2 topRight = topLeft + new Vector2(size.X, 0);
-						Vector2 botRight = topLeft + size;
-						ReLogic.Content.Asset<Texture2D> brain = Terraria.GameContent.TextureAssets.Npc[NPCID.BrainofCthulhu];
-						spriteBatch.Draw(brain.Value, Vector2.Lerp(botLeft, topRight, percent) - (npc.Size * 0.5f) - screenPos, npc.frame, drawColor * npc.Opacity);
-						spriteBatch.Draw(brain.Value, Vector2.Lerp(botRight, topLeft, percent) - (npc.Size * 0.5f) - screenPos, npc.frame, drawColor * npc.Opacity);
-						spriteBatch.Draw(brain.Value, Vector2.Lerp(topRight, botLeft, percent) - (npc.Size * 0.5f) - screenPos, npc.frame, drawColor * npc.Opacity);
-					}
-					return true;
-				default:
-					return base.PreDraw(npc, spriteBatch, screenPos, drawColor);
-			}
-		}
-
-
-
-		//Just so it's not taking space at the top of the file tbh
-		private void SetEnemyStats(NPC npc)
-		{
-			switch (npc.type)
-			{
+                //Level 1
+				#region Forest
 				case NPCID.Wolf:
 					npc.lifeMax = 70;
-					npc.damage = 25;
-					npc.defense = 6;
+					npc.damage = 20;
 					break;
-				case NPCID.Raven:
-					npc.lifeMax = 20;
-					npc.damage = 15;
+                case NPCID.Raven:
+                    npc.lifeMax = 20;
+                    npc.damage = 15;
+                    break;
+                case NPCID.GoblinArcher:
+                    npc.lifeMax = 35;
+                    npc.damage = 15;
+                    break;
+                case NPCID.GoblinThief:
+                    npc.lifeMax = 50;
+                    npc.damage = 20;
+                    break;
+                case NPCID.GoblinSorcerer:
+                    npc.lifeMax = 20;
+                    npc.damage = 15;
+                    break;
+                #endregion
+
+                //Level 2
+                #region Crimson
+                case NPCID.Crimera:
+                    npc.lifeMax = 30;
+                    break;
+                case NPCID.Drippler:
+                    npc.lifeMax = 60;
+                    break;
+                //No Blood Jellies present
+                //case NPCID.BloodJelly:
+                    //npc.lifeMax = 80;
+                    //npc.damage = 30;
+                    //break;
+                case NPCID.BloodCrawler:
+                    npc.lifeMax = 60;
+                    break;
+                case NPCID.BloodCrawlerWall:
+                    npc.lifeMax = 60;
+                    break;
+                case NPCID.Crimslime:
+                    npc.lifeMax = 140;
+                    npc.damage = 30;
+                    npc.knockBackResist = 0f;
+                    break;
+                case NPCID.BrainofCthulhu:
+                    npc.lifeMax = 2000;
+                    npc.knockBackResist = 0f; //Takes 0 knockback
+                    break;
+                case NPCID.Creeper:
+                    npc.lifeMax = 5;
+                    npc.knockBackResist = 0f;
+                    npc.defense = 4; //Make ultra low damage projectile spam less effective at clearing low-health targets
+                    npc.scale = 1.4f;
+                    npc.damage = 45;
+                    return;
+                #endregion
+
+                //Level 2
+                #region Corruption
+                case NPCID.EaterofSouls:
+                    npc.lifeMax = 30;
+                    break;
+                case NPCID.DevourerHead:
+                    npc.lifeMax = 400;
+                    npc.damage = 40;
+                    break;
+                case NPCID.DevourerBody:
+                case NPCID.DevourerTail:
+                    npc.lifeMax = 400;
+                    break;
+                #endregion
+
+                //Level 3.a
+                #region Desert
+                case NPCID.Mummy:
+					npc.lifeMax = 400;
+					npc.damage = 80;
 					break;
-				case NPCID.Mummy:
-					npc.lifeMax = 150;
-					npc.defense = 20;
+                case NPCID.DesertGhoul:
+                    npc.lifeMax = 80;
+                    npc.damage = 40;
 					break;
-				case NPCID.DesertGhoul:
-					npc.defense = 12;
-					break;
-				case NPCID.DesertDjinn:
-					npc.defense = 10;
-					break;
-				case NPCID.CultistDevote:
-					npc.lifeMax = 150;
-					npc.damage = 50;
-					break;
-				case NPCID.CultistArcherBlue:
-					npc.lifeMax = 275;
-					npc.damage = 75;
-					break;
-				case NPCID.IceGolem:
-					npc.lifeMax = 1000;
-					npc.damage = 65;
-					break;
-				case NPCID.IceElemental:
-					npc.lifeMax = 225;
-					npc.damage = 90;
-					break;
+				// Sand Poachers have two NPC IDs???
+				//Yeah they do lmao. Relogic's fuckin hilarious amirite?
+                case NPCID.DesertScorpionWalk:
+                case NPCID.DesertScorpionWall:
+                    npc.lifeMax = 175;
+                    npc.damage = 35;
+                    break;
+                case NPCID.DesertDjinn:
+                    npc.lifeMax = 80;
+                    npc.damage = 40;
+                    break;
+                case NPCID.Vulture:
+                    npc.lifeMax = 60;
+                    npc.damage = 20;
+                    break;
+				#endregion
+
+                //Level 3.b
+                #region Frozen City
+                case NPCID.CultistDevote:
+                    npc.lifeMax = 100;
+                    npc.damage = 50;
+                    npc.chaseable = true;
+                    break;
+                case NPCID.CultistArcherBlue:
+                    npc.lifeMax = 160;
+                    npc.damage = 35;
+                    npc.chaseable = true;
+                    break;
+                case NPCID.IceGolem:
+                    npc.lifeMax = 600;
+                    npc.damage = 50;
+                    break;
+                case NPCID.IceElemental:
+                    npc.lifeMax = 120;
+                    npc.damage = 35;
+                    break;
+                #endregion
+
+                //Level 4.a.a
+                #region Hive
+                case NPCID.Hornet:
+                    npc.lifeMax = 175;
+                    break;
+                #endregion
+
+                //Level 4.b.a
+                #region Dungeon
+                case NPCID.DiabolistRed:
+                case NPCID.DiabolistWhite:
+                    npc.lifeMax = 125;
+                    npc.damage = 75;
+                    break;
+                case NPCID.RaggedCaster:
+                case NPCID.RaggedCasterOpenCoat:
+                    npc.lifeMax = 125;
+                    npc.damage = 60;
+                    break;
+                case NPCID.RustyArmoredBonesAxe:
+                case NPCID.RustyArmoredBonesFlail:
+                case NPCID.RustyArmoredBonesSword:
+                case NPCID.RustyArmoredBonesSwordNoArmor:
+                    npc.lifeMax = 400;
+                    npc.damage = 60;
+                    break;
+                #endregion
+
+                //Level 5
+                #region Caverns
+                case NPCID.GraniteFlyer: //Granite Elemental
+                    npc.lifeMax = 200;
+                    npc.damage = 80;
+                    break;
+                case NPCID.Skeleton:
+                    npc.lifeMax = 300;
+                    npc.damage = 60;
+                    break;
+                case NPCID.Tim:
+                    npc.lifeMax = 250;
+                    npc.damage = 60;
+                    break;
+                case NPCID.RockGolem:
+                    break;
+                #endregion
+
+                //Do early return if you don't want enemy to have 0 defence
+                //No point repeating the same line a bajillion times
+                default:
+                    break;
 			}
+			npc.defense = 0;
 		}
 	}
 }

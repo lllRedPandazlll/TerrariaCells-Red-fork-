@@ -11,6 +11,7 @@ using Terraria.ModLoader;
 using Terraria.ModLoader.IO;
 using TerrariaCells.Common.Configs;
 using TerrariaCells.Common.Items;
+using TerrariaCells.Common.Systems;
 
 namespace TerrariaCells.Common.Items;
 
@@ -51,7 +52,7 @@ public class InventoryManager : ModSystem, IEntitySource
     /// If nothing is found, it returns TerraCellsItemCategory.Default
     /// <summary>
     public static TerraCellsItemCategory GetItemCategorization(Item item) =>
-        item is ITerraCellsCategorization categorization
+        item.ModItem is ITerraCellsCategorization categorization
             ? categorization.Category
             : VanillaItemCategorizations.GetValueOrDefault(
                 (short)item.netID,
@@ -59,7 +60,12 @@ public class InventoryManager : ModSystem, IEntitySource
             );
 
     public static TerraCellsItemCategory GetItemCategorization(int type) =>
-        VanillaItemCategorizations.GetValueOrDefault((short)type, TerraCellsItemCategory.Default);
+        ModContent.GetModItem(type) is ITerraCellsCategorization categorization
+            ? categorization.Category
+            : VanillaItemCategorizations.GetValueOrDefault(
+                (short)type,
+                TerraCellsItemCategory.Default
+            );
 
     public static StorageItemSubcategorization GetStorageItemSubcategorization(Item item) =>
         GetItemCategorization(item) is TerraCellsItemCategory.Storage
@@ -107,11 +113,11 @@ public class InventoryManager : ModSystem, IEntitySource
     /// DOES NOT CONTAIN MODDED ITEMS. It only contains categorizations for items with a vanilla ItemID.
     /// Categorization for modded items are contained within their own classes, using ITerraCellsCategorization
     /// <summary>
-    private static Dictionary<short, TerraCellsItemCategory> VanillaItemCategorizations;
+    private static Dictionary<short, TerraCellsItemCategory> VanillaItemCategorizations = [];
 
-    private static Dictionary<short, StorageItemSubcategorization> StorageSubcategorizations;
+    private static Dictionary<short, StorageItemSubcategorization> StorageSubcategorizations = [];
 
-    public override void SetStaticDefaults()
+    public override void Load()
     {
         Dictionary<string, string> deserialized;
 
@@ -151,30 +157,59 @@ public class InventoryManager : ModSystem, IEntitySource
             )
             .ToDictionary();
 
-        On_Player.CanAcceptItemIntoInventory += new(FilterPickups);
+        On_Player.CanAcceptItemIntoInventory += FilterPickups;
+        On_Player.GetItem_FillIntoOccupiedSlot += On_Player_GetItem_FillIntoOccupiedSlot;
+        On_Player.GetItem_FillEmptyInventorySlot += On_Player_GetItem_FillEmptyInventorySlot;
     }
 
-    public override void PostUpdateWorld()
+    private bool On_Player_GetItem_FillEmptyInventorySlot(On_Player.orig_GetItem_FillEmptyInventorySlot orig, Player self, int plr, Item newItem, GetItemSettings settings, Item returnItem, int i)
+    {
+        if (i is not (>= WEAPON_SLOT_1 and <= POTION_SLOT) && i is not (>= STORAGE_SLOT_1 and <= STORAGE_SLOT_4) && i is not (>= 50 and <= 53))
+        {
+            return false;
+        }
+        return orig.Invoke(self, plr, newItem, settings, returnItem, i);
+    }
+
+    private bool On_Player_GetItem_FillIntoOccupiedSlot(On_Player.orig_GetItem_FillIntoOccupiedSlot orig, Player self, int plr, Item newItem, GetItemSettings settings, Item returnItem, int i)
+    {
+        if (i is not (>= WEAPON_SLOT_1 and <= POTION_SLOT) && i is not (>= STORAGE_SLOT_1 and <= STORAGE_SLOT_4) && i is not (>= 50 and <= 53))
+        {
+            return false;
+        }
+        return orig.Invoke(self, plr, newItem, settings, returnItem, i);
+    }
+
+    public override void PostUpdatePlayers()
     {
         if (DevConfig.Instance.EnableInventoryLock)
         {
-            foreach (Terraria.Player player in Main.ActivePlayers)
+            if (Main.netMode == NetmodeID.Server)
             {
-                if (player.selectedItem < INVENTORY_SLOT_COUNT)
-                    continue;
+                foreach (Player player in Main.ActivePlayers)
+                {
+                    SortInventory(player);
 
-                if (player.selectedItem > INVENTORY_SLOT_COUNT + 2)
-                    player.selectedItem = 0;
-                else
-                    player.selectedItem = INVENTORY_SLOT_COUNT - 1;
+                    if (player.selectedItem < INVENTORY_SLOT_COUNT)
+                        continue;
+
+                    if (player.selectedItem > INVENTORY_SLOT_COUNT + 2)
+                        player.selectedItem = 0;
+                    else
+                        player.selectedItem = INVENTORY_SLOT_COUNT - 1;
+                }
             }
-            // }
-
-            // if (config.EnableInventoryLock)
-            // {
-            foreach (Terraria.Player player in Main.player)
+            else
             {
-                SortInventory(player);
+                SortInventory(Main.LocalPlayer);
+
+                if (Main.LocalPlayer.selectedItem < INVENTORY_SLOT_COUNT)
+                    return;
+
+                if (Main.LocalPlayer.selectedItem > INVENTORY_SLOT_COUNT + 2)
+                    Main.LocalPlayer.selectedItem = 0;
+                else
+                    Main.LocalPlayer.selectedItem = INVENTORY_SLOT_COUNT - 1;
             }
         }
     }
@@ -269,7 +304,7 @@ public class InventoryManager : ModSystem, IEntitySource
                 return false;
 
             case TerraCellsItemCategory.Weapon:
-                if (WeaponsSlotsFull(player))
+                if (WeaponsSlotsFull(player, item))
                 {
                     for (int i = 10; true; i++)
                     {
@@ -296,7 +331,7 @@ public class InventoryManager : ModSystem, IEntitySource
                 player.inventory[previousInventorySlot].TurnToAir();
                 return true;
             case TerraCellsItemCategory.Skill:
-                if (SkillsSlotsFull(player))
+                if (SkillsSlotsFull(player, item))
                 {
                     for (int i = 10; true; i++)
                     {
@@ -323,7 +358,7 @@ public class InventoryManager : ModSystem, IEntitySource
                 player.inventory[previousInventorySlot].TurnToAir();
                 return true;
             case TerraCellsItemCategory.Potion:
-                if (PotionSlotFull(player))
+                if (PotionSlotFull(player, item))
                 {
                     for (int i = 10; true; i++)
                     {
@@ -386,42 +421,27 @@ public class InventoryManager : ModSystem, IEntitySource
         Item item
     )
     {
+        bool origResult = orig.Invoke(player, item);
+        if (!origResult)
+            return origResult;
         if (!DevConfig.Instance.EnableInventoryLock)
         {
-            return true;
+            return origResult;
         }
 
         return GetItemCategorization(item) switch
         {
             TerraCellsItemCategory.Default => true,
             TerraCellsItemCategory.Pickup => true,
-            TerraCellsItemCategory.Weapon => !WeaponsSlotsFull(player) | !StorageSlotsFull(player),
-            TerraCellsItemCategory.Skill => !SkillsSlotsFull(player) | !StorageSlotsFull(player),
-            TerraCellsItemCategory.Potion => !PotionSlotFull(player) | !StorageSlotsFull(player),
-            TerraCellsItemCategory.Storage => !StorageSlotsFull(player)
+            TerraCellsItemCategory.Weapon => !WeaponsSlotsFull(player, item) | !StorageSlotsFull(player, item),
+            TerraCellsItemCategory.Skill => !SkillsSlotsFull(player, item) | !StorageSlotsFull(player, item),
+            TerraCellsItemCategory.Potion => !PotionSlotFull(player, item) | !StorageSlotsFull(player, item),
+            TerraCellsItemCategory.Storage => !StorageSlotsFull(player, item)
                 | !DoesStorageItemGoIntoRegularInventory(GetStorageItemSubcategorization(item)),
             _ => throw new System.Exception(
                 "Missing Item category check (I hate runtime exceptions but i cant think of a better solution atm)"
             ),
         };
-    }
-
-    public Item OnItemPickup(
-        On_Player.orig_PickupItem orig,
-        Terraria.Player self,
-        int playerIndex,
-        int worldItemArrayIndex,
-        Item itemToPickUp
-    )
-    {
-        // if (config.EnableInventoryLock)
-        // {
-        //     MoveItemToItsDedicatedCategory(Main.player[playerIndex], itemToPickUp, 13);
-        // }
-
-
-
-        return itemToPickUp;
     }
 
     public static bool DoesStorageItemGoIntoRegularInventory(
@@ -437,24 +457,38 @@ public class InventoryManager : ModSystem, IEntitySource
         };
     }
 
+    private static bool CanAcceptNewItem(Player player, int slot, Item newItem)
+    {
+        Item slotItem = player.inventory[slot];
+        return CanAcceptNewItem(slotItem, newItem);
+    }
+
+    private static bool CanAcceptNewItem(Item slot, Item newItem)
+    {
+        if (slot.IsAir) return true;
+        if (slot.type == newItem.type) return slot.stack < slot.maxStack;
+        return false;
+    }
+
     /// <summary>
     /// Checks the two inventory slots that are used for weapons, and returns true if both are occupied.
     /// </summary>
-    public static bool WeaponsSlotsFull(Terraria.Player player) =>
-        !player.inventory[WEAPON_SLOT_1].IsAir && !player.inventory[WEAPON_SLOT_2].IsAir;
+    public static bool WeaponsSlotsFull(Player player, Item pickup) =>
+        !CanAcceptNewItem(player, WEAPON_SLOT_1, pickup) && !CanAcceptNewItem(player, WEAPON_SLOT_2, pickup);
 
-    public static bool SkillsSlotsFull(Terraria.Player player) =>
-        !player.inventory[SKILL_SLOT_1].IsAir && !player.inventory[SKILL_SLOT_2].IsAir;
+    public static bool SkillsSlotsFull(Player player, Item pickup) =>
+        !CanAcceptNewItem(player, SKILL_SLOT_1, pickup) && !CanAcceptNewItem(player, SKILL_SLOT_2, pickup);
 
-    public static bool PotionSlotFull(Terraria.Player player) =>
-        !player.inventory[POTION_SLOT].IsAir;
+    public static bool PotionSlotFull(Player player, Item pickup) =>
+        !CanAcceptNewItem(player, POTION_SLOT, pickup);
 
-    public static bool StorageSlotsFull(Terraria.Player player) =>
-        !player.inventory[STORAGE_SLOT_1].IsAir
-        && !player.inventory[STORAGE_SLOT_2].IsAir
-        && !player.inventory[STORAGE_SLOT_3].IsAir
-        && !player.inventory[STORAGE_SLOT_4].IsAir;
+    public static bool StorageSlotsFull(Player player, Item pickup) =>
+        !CanAcceptNewItem(player, STORAGE_SLOT_1, pickup)
+        && !CanAcceptNewItem(player, STORAGE_SLOT_2, pickup)
+        && !CanAcceptNewItem(player, STORAGE_SLOT_3, pickup)
+        && !CanAcceptNewItem(player, STORAGE_SLOT_4, pickup);
 
-    public static bool AccessorySlotsFull(Terraria.Player player) =>
-        !player.armor[3].IsAir && !player.armor[4].IsAir;
+    public static bool AccessorySlotsFull(Player player, Item pickup) =>
+        CanAcceptNewItem(player.armor[3], pickup) && CanAcceptNewItem(player.armor[4], pickup);
+
 }

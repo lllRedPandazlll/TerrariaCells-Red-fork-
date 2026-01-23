@@ -1,8 +1,15 @@
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+
 using Terraria;
+using Terraria.Audio;
 using Terraria.ID;
 using Terraria.ModLoader;
+using Terraria.ModLoader.IO;
+
 using TerrariaCells.Common.ModPlayers;
+using TerrariaCells.Common.Utilities;
 
 namespace TerrariaCells.Common.Systems;
 
@@ -49,7 +56,6 @@ public class ClickedHeartsTracker : ModSystem
             resettingHearts.Add((i, j));
         }
         collectedHearts.Clear();
-        Main.LocalPlayer.GetModPlayer<LifeModPlayer>().extraHealth = 0;
     }
 
     public void ClickedHeart(int i, int j)
@@ -70,8 +76,7 @@ public class ClickedHeartsTracker : ModSystem
         if (!collectedHearts.Contains(coords))
         {
             collectedHearts.Add(coords);
-            Main.player[Main.myPlayer].GetModPlayer<LifeModPlayer>().extraHealth += 20;
-            Main.LocalPlayer.Heal(20);
+            Main.player[Main.myPlayer].GetModPlayer<LifeModPlayer>().IncreasePlayerHealth(20);
             tile = Main.tile[i, j];
             tile.IsActuated = true;
             tile = Main.tile[i + 1, j];
@@ -80,6 +85,65 @@ public class ClickedHeartsTracker : ModSystem
             tile.IsActuated = true;
             tile = Main.tile[i + 1, j + 1];
             tile.IsActuated = true;
+
+            // SoundEngine.PlaySound(new SoundStyle("Terraria/Sounds/Item_4"));
+            SoundEngine.PlaySound(new SoundStyle("Terraria/Sounds/Shatter"));
+
+            if (Main.netMode == 1)
+            {
+                var packet = ModNetHandler.GetPacket(Mod, TCPacketType.HeartPacket);
+                packet.Write((byte)Content.Packets.HeartPacketHandler.HeartPacketType.ClientUse);
+                packet.Write((ushort)i);
+                packet.Write((ushort)j);
+                packet.Send();
+            }
+        }
+    }
+
+    public override void NetSend(BinaryWriter writer)
+    {
+        writer.Write((ushort)collectedHearts.Count);
+        for (int i = 0; i < collectedHearts.Count; i++)
+        {
+            writer.Write((ushort)collectedHearts[i].Item1);
+            writer.Write((ushort)collectedHearts[i].Item2);
+        }
+    }
+    public override void NetReceive(BinaryReader reader)
+    {
+        int count = (int)reader.ReadUInt16();
+        List<(int, int)> collected = new List<(int, int)>();
+        for (int i = 0; i < count; i++)
+        {
+            collected.Add(((int)reader.ReadUInt16(), (int)reader.ReadUInt16()));
+            //Prefer Framing.GetTileSafely(..) but I'm tired and running on caffeine so /whatever/
+            (int x, int y) = collected[i];
+            Tile tile = Main.tile[x, y];
+            tile.IsActuated = true;
+            tile = Main.tile[x + 1, y];
+            tile.IsActuated = true;
+            tile = Main.tile[x, y + 1];
+            tile.IsActuated = true;
+            tile = Main.tile[x + 1, y + 1];
+            tile.IsActuated = true;
+        }
+        collectedHearts = collected;
+    }
+
+    public override void SaveWorldData(TagCompound tag)
+    {
+        tag.Add(nameof(collectedHearts)+"a", collectedHearts.Select(x=>x.Item1).ToList<int>());
+        tag.Add(nameof(collectedHearts) + "b", collectedHearts.Select(x => x.Item2).ToList<int>());
+    }
+    public override void LoadWorldData(TagCompound tag)
+    {
+        try
+        {
+            collectedHearts = (List<(int, int)>)tag.GetList<int>(nameof(collectedHearts) + "a")?.Zip(tag.GetList<int>(nameof(collectedHearts) + "b")).ToList() ?? new List<(int, int)>();
+        }
+        catch (System.Exception x)
+        {
+            collectedHearts = new List<(int, int)>();
         }
     }
 
